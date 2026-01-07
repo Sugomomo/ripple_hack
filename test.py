@@ -10,6 +10,8 @@ from xrpl.utils import datetime_to_ripple_time
 import json 
 import time 
 from datetime import datetime 
+default_mode = "FINISH"
+
 
 json_rpc_url = "https://s.altnet.rippletest.net:51234/"
 client = JsonRpcClient(json_rpc_url) #connecting to testnet
@@ -45,6 +47,7 @@ def show_acc_info(address: str):
 show_acc_info(payer_test_account)  
 show_acc_info(reciever_test_account)
 '''
+
 def ripple_time_now(seconds:int) -> int:
     now = datetime_to_ripple_time(datetime.now())
     return now + int(seconds)
@@ -68,27 +71,25 @@ print(json.dumps(escrow_resp.result, indent=2))
 escrow_owner = payer_test_account
 escrow_id = escrow_resp.result['tx_json']['Sequence']
 
+if default_mode == 'FINISH':
+    #time.sleep(12) #to fast forward, for testing purposes 
+    expire_escrow = EscrowFinish(
+        account=reciever_test_account,
+        owner=escrow_owner,
+        offer_sequence=int(escrow_id),
+    )
+    print("\nSubmitting EscrowFinish (GOV claims)...")
+    finish_resp = submit_and_wait(expire_escrow, client, reciever_test_wallet)
+    print(json.dumps(finish_resp.result, indent=2))
 
-#time.sleep(12) #to fast forward, for testing purposes 
-expire_escrow = EscrowFinish(
-    account=reciever_test_account,
-    owner=escrow_owner,
-    offer_sequence=int(escrow_id),
-)
-print("\nSubmitting EscrowFinish (GOV claims)...")
-finish_resp = submit_and_wait(expire_escrow, client, reciever_test_wallet)
-print(json.dumps(finish_resp.result, indent=2))
+elif default_mode == 'CANCEL':
+    #time.sleep(65) #to fast forward, for testing purpose 
+    cancel_escrow = EscrowCancel(
+        account=payer_test_account,
+        owner=escrow_owner,
+        offer_sequence=int(escrow_id),
+    )
 
-
-'''
-time.sleep(65)
-cancel_escrow = EscrowCancel(
-     account=payer_test_account,
-    owner=escrow_owner,
-    offer_sequence=int(escrow_id),
-)
-
-print("\nSubmitting EscrowCancel (PAYER refunds)...")
-cancel_resp = submit_and_wait(cancel_escrow, client, payer_test_wallet)
-print(json.dumps(cancel_resp.result, indent=2))
-'''
+    print("\nSubmitting EscrowCancel (PAYER refunds)...")
+    cancel_resp = submit_and_wait(cancel_escrow, client, payer_test_wallet)
+    print(json.dumps(cancel_resp.result, indent=2))
