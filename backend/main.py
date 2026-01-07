@@ -32,6 +32,8 @@ class VerifiedAddresses(Base):
     id = Column(Integer, primary_key=True, index=True)
     address = Column(String, index=True)
 
+Base.metadata.create_all(bind=engine)
+
 class AddressRequest(BaseModel):
     address: str
 
