@@ -6,6 +6,7 @@ from xrpl.models.requests.account_objects import AccountObjects
 from xrpl.models.transactions import EscrowCreate, EscrowFinish, EscrowCancel
 from xrpl.transaction import submit_and_wait
 from xrpl.models.requests import ServerInfo
+from xrpl.models.requests import Ledger
 from fastapi import FastAPI
 import sqlite3
 import os 
@@ -244,23 +245,23 @@ if default_mode == "FINISH":
     time.sleep(wait_s)
 
     fulfillment = "A0228020" + preimage_hex.upper()
-
-    print("\nSubmitting EscrowFinish (receiver claims with fulfillment)...")
+    
+    print("\nSubmitting EscrowFinish (PAYER approves and finishes escrow)...")
     last_err = None
 
     for i in range(20):
         try:
             # IMPORTANT: recreate tx each retry so LastLedgerSequence is fresh
             finish_tx = EscrowFinish(
-                account=pasted_destination,   # ✅ receiver submits finish
+                account=payer_addr,   # ✅ payer submits finish (sender-approval escrow)
                 owner=escrow_owner,
                 offer_sequence=offer_sequence,
                 condition=condition,
                 fulfillment=fulfillment,      # ✅ must satisfy condition
             )
 
-            # IMPORTANT: must sign with the receiver's wallet
-            finish_resp = submit_and_wait(finish_tx, client, receiver_wallet)
+            # IMPORTANT: must sign with the payer's wallet (matches account=payer_addr)
+            finish_resp = submit_and_wait(finish_tx, client, payer_wallet)
             print(json.dumps(finish_resp.result, indent=2))
             break
 
@@ -274,6 +275,8 @@ if default_mode == "FINISH":
 
 elif default_mode == "CANCEL":
     wait_s = finish_seconds + cancel_extra + 5
+    # Align with main.py: wait until cancel_after is actually valid (ledger-time based)
+    wait_s = max(0, (cancel_after - ledger_close_time()) + 10)
     print(f"\nWaiting ~{wait_s}s before trying EscrowCancel...")
     time.sleep(wait_s)
 
