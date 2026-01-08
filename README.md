@@ -6,7 +6,8 @@ The project is built on Ripple and the XRP Ledger (XRPL) and explores how time-b
 Our core idea is to leverage XRPL’s native escrow primitives to enforce cool-off periods, verification-aware cancellation logic, and on-ledger enforcement, rather than relying on off-chain trust.
 
 
-Problem Motivation
+Problem Motivation:
+
 Scam cases often involve attackers impersonating trusted government entities and pressuring victims to send funds immediately.
 Once funds are transferred, recovery is usually impossible.
 This project demonstrates how time-locked escrows on XRPL can:
