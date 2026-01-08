@@ -44,67 +44,8 @@ function App() {
   const [active_tab, set_active_tab] =
     useState<TabType>("pending");
 
-  const [transactions, set_transactions] = useState<
-    Transaction[]
-  >([
-    {
-      id: "tx_001",
-      from_address: user_wallet,
-      to_address: "medgov.sg", // User selected the verified address from suggestion
-      amount: 0.5,
-      status: "pending",
-      created_at: new Date(
-        Date.now() - 2 * 24 * 60 * 60 * 1000,
-      ), // 2 days ago
-      escrow_end_time: new Date(
-        Date.now() + 1 * 24 * 60 * 60 * 1000,
-      ), // 1 day remaining
-      is_recipient_verified: true,
-    },
-    {
-      id: "tx_002",
-      from_address: user_wallet,
-      to_address: "govsmed", // User proceeded with unverified address despite warning
-      amount: 0.75,
-      status: "pending",
-      created_at: new Date(
-        Date.now() - 1 * 24 * 60 * 60 * 1000,
-      ), // 1 day ago
-      escrow_end_time: new Date(
-        Date.now() + 2 * 24 * 60 * 60 * 1000,
-      ), // 2 days remaining
-      is_recipient_verified: false,
-    },
-    {
-      id: "tx_003",
-      from_address: VERIFIED_WALLETS[2],
-      to_address: user_wallet,
-      amount: 1.25,
-      status: "pending",
-      created_at: new Date(
-        Date.now() - 4 * 24 * 60 * 60 * 1000,
-      ), // 4 days ago
-      escrow_end_time: new Date(
-        Date.now() - 1 * 24 * 60 * 60 * 1000,
-      ), // can claim now
-      is_recipient_verified:
-        VERIFIED_WALLETS.includes(user_wallet),
-    },
-    {
-      id: "tx_004",
-      from_address: user_wallet,
-      to_address: VERIFIED_WALLETS[1],
-      amount: 0.25,
-      status: "completed",
-      created_at: new Date(
-        Date.now() - 10 * 24 * 60 * 60 * 1000,
-      ),
-      escrow_end_time: new Date(
-        Date.now() - 7 * 24 * 60 * 60 * 1000,
-      ),
-      is_recipient_verified: true,
-    },
-  ]);
+  const [transactions, set_transactions] = useState<Transaction[]>([]);
+
 
   const handle_send_payment = (
     to_address: string,
