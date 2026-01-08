@@ -15,6 +15,8 @@ This project demonstrates how time-locked escrows on XRPL can:
 3. Allow cancellation if suspicious behavior is detected
 4. Differentiate behavior based on verified vs unverified recipients
 
+## High-Level Architecture
+```text
 Frontend (React)
 │
 │  (UX simulation / demo)
@@ -26,12 +28,14 @@ Backend (FastAPI)
 │
 ▼
 XRPL Testnet
-
+```
 Frontend: Demonstrates the user experience of sending funds into escrow, modifying, cancelling, or claiming transactions.
 Backend: Implements real XRPL escrow creation, finish, and cancel flows.
 XRPL Testnet: Enforces escrow conditions and timing on-ledger.
 
-.
+## Repository Structure
+
+```text
 ├── backend/                # Core backend logic (authoritative)
 │   ├── main.py             # FastAPI app + XRPL escrow logic
 │   ├── requirements.txt    # Reference only
@@ -47,6 +51,7 @@ XRPL Testnet: Enforces escrow conditions and timing on-ledger.
 ├── mod8.py                 # Reference XRPL utilities
 ├── .env.example
 └── README.md               # (This file)
+```
 
 Backend Overview (XRPL Logic)
 The backend is a FastAPI service that:
