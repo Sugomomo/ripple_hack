@@ -1,3 +1,5 @@
+import uuid
+import anyio
 import os
 import time
 import json
@@ -69,6 +71,29 @@ class TranscationLog(Base):
     details = Column(String, nullable=False)
     timestamp = Column(Integer, nullable=False)
 
+###
+class EscrowTransaction(Base):
+    __tablename__ = "escrow_transactions"
+
+    id = Column(String, primary_key=True, index=True)
+    from_address = Column(String, index=True, nullable=False)
+    to_address = Column(String, index=True, nullable=False)
+
+    amount_drops = Column(String, nullable=False)
+
+    owner_address = Column(String, nullable=False)      # XRPL escrow owner
+    offer_sequence = Column(Integer, nullable=False)
+
+    condition = Column(String, nullable=False)
+    fulfillment = Column(String, nullable=False)
+
+    finish_after = Column(Integer, nullable=False)
+    cancel_after = Column(Integer, nullable=False)
+
+    status = Column(String, nullable=False)  # pending | cancelled | completed
+    created_at = Column(Integer, nullable=False)
+###
+
 Base.metadata.create_all(bind=engine)
 
 JSON_RPC_URL = "https://s.altnet.rippletest.net:51234/"
@@ -97,6 +122,15 @@ def ledger_close_time() -> int:
 
     return int(datetime_to_ripple_time(datetime.now(timezone.utc)))
 
+###
+def unix_to_iso(ts: int) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+def ripple_to_unix(ripple_time: int) -> int:
+    # Ripple epoch starts 2000-01-01
+    return ripple_time + 946684800
+###
+
 def escrow_exists(owner_address: str, destination: str, amount: str, retries: int = 10, delay_s: float = 1.0) -> bool:
     last = None
     for _ in range(retries):
@@ -121,30 +155,39 @@ def generate_condition_and_fulfillment():
     fulfillment = "A0228020" + preimage_hex
     return condition, fulfillment, preimage_hex
 
-def seed_gov_entities(db: Session, target_count: int = 10):
+
+###
+async def seed_gov_entities(db: Session, target_count: int = 10):
     existing = db.query(GovEntity).count()
     if existing >= target_count:
         return
 
     for i in range(existing + 1, target_count + 1):
-        w = generate_faucet_wallet(client, debug=True)
+        # IMPORTANT: await the async faucet call
+        w = await anyio.to_thread.run_sync(lambda: generate_faucet_wallet(client, debug=True))
+
+
         entity_key = f"gov_{i:02d}"
         name = f"Government Entity {i:02d}"
+
         db.merge(GovEntity(
             entity_key=entity_key,
             name=name,
             classic_address=w.classic_address,
             seed=w.seed,
         ))
+
     db.commit()
 
+
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     db = SessionLocal()
     try:
-        seed_gov_entities(db, 10)
+        await seed_gov_entities(db, 10)
     finally:
         db.close()
+
 
 class AddressRequest(BaseModel):
     address: str
@@ -158,9 +201,30 @@ class EscrowDemoRequest(BaseModel):
     cancel_seconds_unverified: int = 1
     mode: str = "FINISH"
 
+###
+class CreateTransactionRequest(BaseModel):
+    from_address: str
+    to_address: str
+    amount: float  # XRP
+
+
+class TransactionResponse(BaseModel):
+    id: str
+    from_address: str
+    to_address: str
+    amount: float
+    status: str
+    created_at: str
+    escrow_end_time: str
+    is_recipient_verified: bool
+###
+from fastapi.responses import RedirectResponse
+
 @app.get("/")
 def root():
     return {"message": "Hello"}
+
+
 
 @app.post("/verify")
 def verify_address(req: AddressRequest, db: Session = Depends(get_db)):
@@ -272,3 +336,95 @@ def escrow_demo(req: EscrowDemoRequest, db: Session = Depends(get_db)):
         }
 
     raise HTTPException(status_code=400, detail="mode must be FINISH or CANCEL")
+
+
+###
+@app.get("/transactions")
+def get_transactions(wallet: str, db: Session = Depends(get_db)):
+    rows = db.query(EscrowTransaction).filter(
+        (EscrowTransaction.from_address == wallet) |
+        (EscrowTransaction.to_address == wallet)
+    ).order_by(EscrowTransaction.created_at.desc()).all()
+
+    out = []
+    for r in rows:
+        out.append({
+            "id": r.id,
+            "from_address": r.from_address,
+            "to_address": r.to_address,
+            "amount": float(r.amount_drops) / 1_000_000,
+            "status": r.status,
+            "created_at": unix_to_iso(r.created_at),
+            "escrow_end_time": unix_to_iso(ripple_to_unix(r.finish_after)),
+            "is_recipient_verified": db.query(GovEntity)
+                .filter(GovEntity.classic_address == r.to_address)
+                .first() is not None
+        })
+    return out
+
+
+@app.post("/transactions")
+def create_transaction(req: CreateTransactionRequest, db: Session = Depends(get_db)):
+    amount_drops = str(int(req.amount * 1_000_000))
+
+    gov = db.query(GovEntity).filter(GovEntity.classic_address == req.to_address).first()
+    verified = gov is not None
+
+    payer_wallet = generate_faucet_wallet(client, debug=True)
+    payer_addr = payer_wallet.classic_address
+
+    condition, fulfillment, _ = generate_condition_and_fulfillment()
+
+    base = ledger_close_time()
+    finish_after = base + SAFE_MIN_FINISH_DELTA
+    cancel_after = finish_after + SAFE_MIN_CANCEL_EXTRA
+
+    create_tx = EscrowCreate(
+        account=payer_addr,
+        amount=amount_drops,
+        destination=req.to_address,
+        finish_after=finish_after,
+        cancel_after=cancel_after,
+        condition=condition,
+    )
+
+    escrow_resp = submit_and_wait(create_tx, client, payer_wallet)
+    if escrow_resp.result.get("meta", {}).get("TransactionResult") != "tesSUCCESS":
+        raise HTTPException(status_code=400, detail="EscrowCreate failed")
+
+    offer_sequence = int(escrow_resp.result["tx_json"]["Sequence"])
+
+    tx_id = f"tx_{uuid.uuid4().hex[:8]}"
+    created_unix = int(datetime.now(timezone.utc).timestamp())
+
+    row = EscrowTransaction(
+        id=tx_id,
+        from_address=req.from_address,
+        to_address=req.to_address,
+        amount_drops=amount_drops,
+        owner_address=payer_addr,
+        offer_sequence=offer_sequence,
+        condition=condition,
+        fulfillment=fulfillment,
+        finish_after=finish_after,
+        cancel_after=cancel_after,
+        status="pending",
+        created_at=created_unix,
+    )
+
+    db.add(row)
+    db.commit()
+
+    return {
+        "id": row.id,
+        "from_address": row.from_address,
+        "to_address": row.to_address,
+        "amount": req.amount,
+        "status": row.status,
+        "created_at": unix_to_iso(row.created_at),
+        "escrow_end_time": unix_to_iso(ripple_to_unix(row.finish_after)),
+        "is_recipient_verified": verified,
+    }
+
+
+#Link to FastAPI docs: https://supreme-computing-machine-wrx4pj4rw9wgf99r5-8000.app.github.dev/docs
