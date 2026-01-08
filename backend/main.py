@@ -3,9 +3,10 @@ import anyio
 import os
 import time
 import json
+import secrets
 import hashlib
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Tuple
 
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -76,12 +77,16 @@ class EscrowTransaction(Base):
     __tablename__ = "escrow_transactions"
 
     id = Column(String, primary_key=True, index=True)
+    sender_token = Column(String, nullable=True, index=True) # for sender_approval function
+    
     from_address = Column(String, index=True, nullable=False)
     to_address = Column(String, index=True, nullable=False)
 
     amount_drops = Column(String, nullable=False)
 
     owner_address = Column(String, nullable=False)      # XRPL escrow owner
+    owner_seed = Column(String, nullable=True) # store seed so backend can approve/cancel
+    
     offer_sequence = Column(Integer, nullable=False)
 
     condition = Column(String, nullable=False)
@@ -95,6 +100,23 @@ class EscrowTransaction(Base):
 ###
 
 Base.metadata.create_all(bind=engine)
+
+def ensure_sqlite_migrations(): # function to auto migrate changes to SQLite db but i think to be sure we should just restart the db?
+    with engine.begin() as conn:
+        row = conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='escrow_transactions';"
+        ).fetchone()
+        if not row:
+            return
+
+        cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(escrow_transactions);").fetchall()]
+
+        if "sender_token" not in cols:
+            conn.exec_driver_sql("ALTER TABLE escrow_transactions ADD COLUMN sender_token TEXT;")
+        if "owner_seed" not in cols:
+            conn.exec_driver_sql("ALTER TABLE escrow_transactions ADD COLUMN owner_seed TEXT;")
+
+ensure_sqlite_migrations()
 
 JSON_RPC_URL = "https://s.altnet.rippletest.net:51234/"
 client = JsonRpcClient(JSON_RPC_URL)
@@ -147,14 +169,31 @@ def escrow_exists(owner_address: str, destination: str, amount: str, retries: in
     print(json.dumps(last, indent=2))
     return False
 
-def generate_condition_and_fulfillment():
-    preimage = os.urandom(32)
+def validate_preimagehex(preimage_hex: str) -> bytes:
+    preimage_hex = preimage_hex.strip()
+    if len(preimage_hex) != 64:
+        raise ValueError("preimage_hex must be exactly 64 hex chars")
+    try:
+        return bytes.fromhex(preimage_hex)
+    except Exception as e:
+        raise ValueError("preimage_hex must be valid") from e
+
+def generate_condition_and_fulfillment(preimage_hex: Optional[str] = None) -> Tuple[str,str,str]: # returns a tuple of 3 strings
+    if preimage_hex:
+        preimage = validate_preimagehex(preimage_hex) 
+    else:
+        preimage = os.urandom(32)
+   
     preimage_hex = preimage.hex().upper()
     digest = hashlib.sha256(preimage).digest()
+    
     condition = "A0258020" + digest.hex().upper() + "810120"
     fulfillment = "A0228020" + preimage_hex
     return condition, fulfillment, preimage_hex
 
+def require_token(row: EscrowTransaction, token: str):
+    if not row.sender_token or token != row.sender_token: # verifies is user is actual sender of escrow
+        raise HTTPException(status_code=403, detail="Invalid User")
 
 ###
 async def seed_gov_entities(db: Session, target_count: int = 10):
@@ -200,13 +239,17 @@ class EscrowDemoRequest(BaseModel):
     cancel_seconds_verified: int = 5
     cancel_seconds_unverified: int = 1
     mode: str = "FINISH"
+    preimage_hex: Optional[str] = None #added
 
 ###
 class CreateTransactionRequest(BaseModel):
     from_address: str
     to_address: str
     amount: float  # XRP
+    preimage_hex: Optional[str] = None #added
 
+class SenderActionRequest(BaseModel):
+    sender_token: str
 
 class TransactionResponse(BaseModel):
     id: str
@@ -254,7 +297,7 @@ def escrow_demo(req: EscrowDemoRequest, db: Session = Depends(get_db)):
 
     destination_addr = req.destination
 
-    condition, fulfillment, preimage_hex = generate_condition_and_fulfillment()
+    condition, fulfillment, preimage_hex = generate_condition_and_fulfillment(req.preimage_hex)
 
     base = ledger_close_time()
     finish_after = base + max(int(req.finish_seconds), SAFE_MIN_FINISH_DELTA)
@@ -281,7 +324,7 @@ def escrow_demo(req: EscrowDemoRequest, db: Session = Depends(get_db)):
 
     if not escrow_exists(escrow_owner, destination_addr, req.amount_drops):
         raise HTTPException(status_code=500, detail="Escrow not visible on ledger after create (node lag or mismatch).")
-
+        
     if req.mode.upper() == "FINISH":
         wait_s = max(0, (finish_after - ledger_close_time()) + 10)
         time.sleep(wait_s)
@@ -289,14 +332,15 @@ def escrow_demo(req: EscrowDemoRequest, db: Session = Depends(get_db)):
         last_err = None
         for _ in range(20):
             try:
+                # make it so that only the payer can FinishEscrow
                 finish_tx = EscrowFinish(
-                    account=receiver_wallet.classic_address,
+                    account=payer_addr,
                     owner=escrow_owner,
                     offer_sequence=offer_sequence,
                     condition=condition,
                     fulfillment=fulfillment,
                 )
-                finish_resp = submit_and_wait(finish_tx, client, receiver_wallet)
+                finish_resp = submit_and_wait(finish_tx, client, payer_wallet)
                 return {
                     "verified_destination": verified,
                     "payer": payer_addr,
@@ -313,11 +357,11 @@ def escrow_demo(req: EscrowDemoRequest, db: Session = Depends(get_db)):
                 time.sleep(4)
 
         raise HTTPException(status_code=500, detail=f"EscrowFinish failed after retries: {last_err}")
-
+        
     if req.mode.upper() == "CANCEL":
         wait_s = max(0, (cancel_after - ledger_close_time()) + 10)
         time.sleep(wait_s)
-
+        
         cancel_tx = EscrowCancel(
             account=payer_addr,
             owner=escrow_owner,
@@ -373,7 +417,10 @@ def create_transaction(req: CreateTransactionRequest, db: Session = Depends(get_
     payer_wallet = generate_faucet_wallet(client, debug=True)
     payer_addr = payer_wallet.classic_address
 
-    condition, fulfillment, _ = generate_condition_and_fulfillment()
+    try:
+        condition, fulfillment, _ = generate_condition_and_fulfillment(req.preimage_hex)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     base = ledger_close_time()
     finish_after = base + SAFE_MIN_FINISH_DELTA
@@ -395,14 +442,17 @@ def create_transaction(req: CreateTransactionRequest, db: Session = Depends(get_
     offer_sequence = int(escrow_resp.result["tx_json"]["Sequence"])
 
     tx_id = f"tx_{uuid.uuid4().hex[:8]}"
+    sender_token = secrets.token_urlsafe(24)
     created_unix = int(datetime.now(timezone.utc).timestamp())
 
     row = EscrowTransaction(
         id=tx_id,
+        sender_token=sender_token,
         from_address=req.from_address,
         to_address=req.to_address,
         amount_drops=amount_drops,
         owner_address=payer_addr,
+        owner_seed=payer_wallet.seed, # needed for approval/cancel
         offer_sequence=offer_sequence,
         condition=condition,
         fulfillment=fulfillment,
@@ -417,6 +467,7 @@ def create_transaction(req: CreateTransactionRequest, db: Session = Depends(get_
 
     return {
         "id": row.id,
+        "sender_token": sender_token,
         "from_address": row.from_address,
         "to_address": row.to_address,
         "amount": req.amount,
@@ -425,6 +476,5 @@ def create_transaction(req: CreateTransactionRequest, db: Session = Depends(get_
         "escrow_end_time": unix_to_iso(ripple_to_unix(row.finish_after)),
         "is_recipient_verified": verified,
     }
-
 
 #Link to FastAPI docs: https://supreme-computing-machine-wrx4pj4rw9wgf99r5-8000.app.github.dev/docs
